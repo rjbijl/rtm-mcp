@@ -7,8 +7,8 @@ from Claude Code in WSL (or any other local MCP client).
 
 | Tool | Purpose |
 |---|---|
-| `rtm_add_task` | Add a task, with Smart Add syntax (`^friday !1 #Work`) or as literal text |
-| `rtm_list_tasks` | Fetch tasks using RTM's filter language (`status:incomplete AND dueBefore:today`) |
+| `rtm_add_task` | Add a task, with Smart Add syntax (`^friday !1 #Work`) or as literal text; tagged with the current project |
+| `rtm_list_tasks` | Fetch tasks using RTM's filter language (`status:incomplete AND dueBefore:today`), scoped to the current project |
 | `rtm_complete_task` | Mark as complete |
 | `rtm_update_task` | Name, due date, priority, tags, estimate |
 | `rtm_delete_task` | Delete (soft delete on RTM's side) |
@@ -54,6 +54,26 @@ has no idea what your working directory is.
 
 Verify with `/mcp` in a session, or `claude mcp list`.
 
+## Project tagging
+
+Claude Code starts the server with the project directory as its working
+directory, and the server lives for one session. That makes the directory name
+a reliable project name without the model having to pass anything:
+
+- inside a git repository the **repository root's** name is used, so
+  `~/dev/icrop/backend` still maps to `icrop`;
+- outside a repository it is the working directory's own name;
+- the home directory and `/` are not projects, so nothing is tagged there;
+- `RTM_PROJECT=name` overrides detection, and an empty `RTM_PROJECT=` turns
+  project tagging off.
+
+Names are lowercased, whitespace becomes `-`, commas are dropped (RTM's tag
+separator). With a project active, `rtm_add_task` tags every new task with it
+(`tag_project=false` opts a single task out) and `rtm_list_tasks` only returns
+tasks carrying that tag (`all_projects=true` widens the search). The project
+name is spelled out in the tool descriptions and server instructions, so the
+model knows which project it is in.
+
 ## How it works
 
 Claude Code starts `dist/index.js` as a subprocess and talks JSON-RPC over
@@ -87,6 +107,7 @@ What the client handles for you:
 npm test                       # signing, normalization, handles, flattening
 node --test test/protocol.test.mjs   # full tool flows against a mock endpoint
 node test/smoke.mjs            # real stdio server through a real MCP client
+node test/live.mjs             # read-only check against the real RTM (needs your credentials)
 ```
 
 The protocol tests run against a local mock RTM, including 503 retry, timeout
