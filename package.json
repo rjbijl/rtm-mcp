@@ -3,9 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MCP server voor Remember The Milk (stdio)",
-  "bin": { "rtm-mcp": "dist/index.js" },
-  "engines": { "node": ">=20" },
+  "description": "MCP server for Remember The Milk (stdio)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rjbijl/rtm-mcp.git"
+  },
+  "bin": {
+    "rtm-mcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc",
     "auth": "tsc && node dist/auth.js",

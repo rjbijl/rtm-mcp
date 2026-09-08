@@ -1,13 +1,42 @@
 import { createHash } from 'node:crypto';
 import type { Credentials } from './config.js';
 
-const REST_ENDPOINT =
-  process.env.RTM_REST_ENDPOINT ?? 'https://api.rememberthemilk.com/services/rest/';
+const DEFAULT_REST_ENDPOINT = 'https://api.rememberthemilk.com/services/rest/';
 export const AUTH_ENDPOINT = 'https://www.rememberthemilk.com/services/auth/';
 
-/** RTM's API-versie. v2 is opt-in gedrag binnen hetzelfde endpoint (start dates,
- *  striktere due-vs-start validatie). Methods die alleen in v2 bestaan geven
- *  zonder deze parameter error 120. */
+/**
+ * The REST endpoint can only be overridden with explicit consent.
+ * Every request carries api_key and auth_token; a silent override through a
+ * single env var would ship those to a foreign host without any code change.
+ * Meant for the tests against the mock RTM, not for production.
+ */
+export function resolveRestEndpoint(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: (msg: string) => void = (msg) => process.stderr.write(`[rtm-mcp] ${msg}\n`)
+): string {
+  const override = env.RTM_REST_ENDPOINT?.trim();
+  if (!override) return DEFAULT_REST_ENDPOINT;
+  if (env.RTM_ALLOW_ENDPOINT_OVERRIDE !== '1') {
+    throw new Error(
+      `RTM_REST_ENDPOINT is set to ${override}, but RTM_ALLOW_ENDPOINT_OVERRIDE=1 is missing. ` +
+        'Without that flag api_key and auth_token go nowhere but RTM.'
+    );
+  }
+  warn(`warning: RTM endpoint overridden to ${override}`);
+  return override;
+}
+
+/** One warning per process is enough, even when several clients are created. */
+let warnedAboutOverride = false;
+function warnOnce(msg: string): void {
+  if (warnedAboutOverride) return;
+  warnedAboutOverride = true;
+  process.stderr.write(`[rtm-mcp] ${msg}\n`);
+}
+
+/** RTM's API version. v2 is opt-in behaviour on the same endpoint (start dates,
+ *  stricter due-vs-start validation). Methods that only exist in v2 return
+ *  error 120 without this parameter. */
 const API_VERSION = '2';
 
 export class RtmError extends Error {
@@ -16,15 +45,15 @@ export class RtmError extends Error {
     message: string,
     readonly method: string
   ) {
-    super(`RTM ${method} faalde (${code}): ${message}`);
+    super(`RTM ${method} failed (${code}): ${message}`);
     this.name = 'RtmError';
   }
 }
 
 /**
- * api_sig: md5( shared_secret + alle params alfabetisch op key gesorteerd,
- * key en value direct aan elkaar geplakt zonder scheidingstekens ).
- * api_sig zelf telt uiteraard niet mee.
+ * api_sig: md5( shared_secret + all params sorted alphabetically by key,
+ * key and value concatenated directly without separators ).
+ * api_sig itself is of course excluded.
  */
 export function signParams(params: Record<string, string>, sharedSecret: string): string {
   const concatenated = Object.keys(params)
@@ -38,9 +67,9 @@ export function signParams(params: Record<string, string>, sharedSecret: string)
 }
 
 /**
- * RTM's JSON-serializer maakt van één element een object en van meerdere een array.
- * Zonder deze normalisatie breekt elke client op accounts met precies één lijst
- * of precies één taak. Dit is dé klassieke RTM-bug.
+ * RTM's JSON serializer turns a single element into an object and multiple
+ * elements into an array. Without this normalization every client breaks on
+ * accounts with exactly one list or exactly one task. This is THE classic RTM bug.
  */
 export function asArray<T>(value: T | T[] | undefined | null): T[] {
   if (value === undefined || value === null) return [];
@@ -48,9 +77,9 @@ export function asArray<T>(value: T | T[] | undefined | null): T[] {
 }
 
 /**
- * Token bucket. RTM staat 1 request/seconde toe met burst tot 3; daarboven
- * worden requests vertraagd en uiteindelijk gedropt met HTTP 503.
- * Een LLM dat vijf tools achter elkaar aanroept loopt daar zonder dit tegenaan.
+ * Token bucket. RTM allows 1 request/second with bursts up to 3; beyond that
+ * requests get throttled and eventually dropped with HTTP 503.
+ * An LLM calling five tools in a row runs straight into that without this.
  */
 class RateLimiter {
   private tokens: number;
@@ -64,7 +93,7 @@ class RateLimiter {
     this.tokens = capacity;
   }
 
-  /** Serialiseert wachters zodat ze in volgorde aan de beurt komen. */
+  /** Serializes waiters so they get their turn in order. */
   acquire(): Promise<void> {
     const wait = this.queue.then(() => this.take());
     this.queue = wait.catch(() => undefined);
@@ -140,19 +169,33 @@ export interface RtmTransaction {
   undoable?: string;
 }
 
+export interface RtmClientOptions {
+  /** How long a single HTTP request may take before it is aborted. */
+  requestTimeoutMs?: number;
+}
+
 export class RtmClient {
   private readonly limiter = new RateLimiter();
   private timeline: string | null = null;
   private listsCache: { at: number; lists: RtmList[] } | null = null;
   private readonly listsCacheTtlMs = 5 * 60 * 1000;
-  /** Laatste undoable transacties, nieuwste eerst. Voedt de undo-tool. */
+  /** Most recent undoable transactions, newest first. Feeds the undo tool. */
   readonly recentTransactions: Array<{ id: string; description: string }> = [];
 
-  constructor(private readonly creds: Credentials) {}
+  private readonly endpoint: string;
+  private readonly requestTimeoutMs: number;
+
+  constructor(
+    private readonly creds: Credentials,
+    opts: RtmClientOptions = {}
+  ) {
+    this.endpoint = resolveRestEndpoint(process.env, warnOnce);
+    this.requestTimeoutMs = opts.requestTimeoutMs ?? 20_000;
+  }
 
   /**
-   * Ruwe API-call. Voegt api_key, format, v, auth_token en api_sig toe en
-   * vertaalt rsp.stat="fail" naar een RtmError.
+   * Raw API call. Adds api_key, format, v, auth_token and api_sig, and
+   * translates rsp.stat="fail" into an RtmError.
    */
   async call<T = Record<string, unknown>>(
     method: string,
@@ -171,7 +214,7 @@ export class RtmClient {
       if (v !== undefined && v !== null && v !== '') payload[k] = v;
     }
     if (authenticated) {
-      if (!this.creds.authToken) throw new Error('Geen auth token beschikbaar.');
+      if (!this.creds.authToken) throw new Error('No auth token available.');
       payload.auth_token = this.creds.authToken;
     }
     payload.api_sig = signParams(payload, this.creds.sharedSecret);
@@ -182,37 +225,42 @@ export class RtmClient {
     for (let attempt = 0; attempt < 4; attempt++) {
       await this.limiter.acquire();
       try {
-        const res = await fetch(REST_ENDPOINT, {
+        const res = await fetch(this.endpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
             'User-Agent': 'rtm-mcp/0.1'
           },
-          body
+          body,
+          // Without a timeout a stalled connection blocks the tool call forever.
+          signal: AbortSignal.timeout(this.requestTimeoutMs)
         });
 
-        // Rate limit overschreden: RTM geeft 503 zonder JSON-body.
+        // Rate limit exceeded: RTM returns 503 without a JSON body.
         if (res.status === 503) {
           lastError = new Error('RTM rate limit (HTTP 503)');
           await sleep(1000 * Math.pow(2, attempt));
           continue;
         }
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status} van RTM bij ${method}`);
+          throw new Error(`HTTP ${res.status} from RTM for ${method}`);
         }
 
         const json = (await res.json()) as { rsp?: Record<string, unknown> };
         const rsp = json.rsp;
-        if (!rsp) throw new Error(`Onverwacht antwoord van RTM bij ${method}`);
+        if (!rsp) throw new Error(`Unexpected response from RTM for ${method}`);
 
         if (rsp.stat === 'fail') {
           const err = (rsp.err ?? {}) as { code?: string; msg?: string };
-          throw new RtmError(err.code ?? '?', err.msg ?? 'onbekende fout', method);
+          throw new RtmError(err.code ?? '?', err.msg ?? 'unknown error', method);
         }
         return rsp as T;
       } catch (e) {
-        if (e instanceof RtmError) throw e; // functionele fout: niet retryen
-        lastError = e;
+        if (e instanceof RtmError) throw e; // functional error: don't retry
+        lastError =
+          e instanceof Error && e.name === 'TimeoutError'
+            ? new Error(`RTM did not respond within ${this.requestTimeoutMs}ms for ${method}`)
+            : e;
         if (attempt === 3) break;
         await sleep(500 * Math.pow(2, attempt));
       }
@@ -221,8 +269,8 @@ export class RtmClient {
   }
 
   /**
-   * Timelines verlopen niet en moeten hergebruikt worden. Eén per proces is
-   * genoeg en scheelt een call van je secondebudget bij elke schrijfactie.
+   * Timelines never expire and should be reused. One per process is enough
+   * and saves a call from your per-second budget on every write.
    */
   async getTimeline(): Promise<string> {
     if (this.timeline) return this.timeline;
@@ -242,7 +290,7 @@ export class RtmClient {
     return lists;
   }
 
-  /** Zoekt een lijst op naam (case-insensitive). Smart lists komen ook terug. */
+  /** Finds a list by name (case-insensitive). Smart lists are included. */
   async findList(name: string): Promise<RtmList | undefined> {
     const needle = name.trim().toLowerCase();
     const lists = await this.getLists();

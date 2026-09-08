@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -9,8 +9,8 @@ export interface StoredAuth {
 }
 
 /**
- * Waar het auth token wordt bewaard. Bewust NIET in de projectmap:
- * dan kan de repo veilig in git en overleeft het token een herinstall.
+ * Where the auth token lives. Deliberately NOT in the project directory:
+ * that keeps the repo safe to commit and lets the token survive a reinstall.
  */
 export function authFilePath(): string {
   const base = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
@@ -31,6 +31,8 @@ export function writeStoredAuth(auth: StoredAuth): string {
   const p = authFilePath();
   mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
   writeFileSync(p, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  // The mode passed to writeFileSync only applies on creation; an existing file keeps its permissions.
+  chmodSync(p, 0o600);
   return p;
 }
 
@@ -46,7 +48,7 @@ export function loadCredentials(requireToken: boolean): Credentials {
 
   if (!apiKey || !sharedSecret) {
     throw new Error(
-      'RTM_API_KEY en RTM_SHARED_SECRET moeten gezet zijn (env of via de MCP-config).'
+      'RTM_API_KEY and RTM_SHARED_SECRET must be set (in the environment or via the MCP config).'
     );
   }
 
@@ -54,7 +56,7 @@ export function loadCredentials(requireToken: boolean): Credentials {
 
   if (requireToken && !authToken) {
     throw new Error(
-      `Geen auth token gevonden. Draai eerst: npm run auth  (token komt in ${authFilePath()})`
+      `No auth token found. Run first: npm run auth  (the token is stored in ${authFilePath()})`
     );
   }
 

@@ -6,8 +6,8 @@ import { RtmClient } from './rtm.js';
 import { registerTools } from './tools.js';
 
 /**
- * Bij stdio-transport IS stdout het JSON-RPC kanaal. Eén console.log en de
- * verbinding is stuk. Alle diagnostiek gaat daarom naar stderr.
+ * With stdio transport, stdout IS the JSON-RPC channel. A single console.log
+ * breaks the connection. All diagnostics therefore go to stderr.
  */
 function log(msg: string): void {
   process.stderr.write(`[rtm-mcp] ${msg}\n`);
@@ -21,29 +21,29 @@ async function main(): Promise<void> {
     { name: 'rtm-mcp', version: '0.1.0' },
     {
       instructions:
-        'Remember The Milk. Taken toevoegen kan met Smart Add syntax in de naam. ' +
-        'Voor wijzigen/afvinken/verwijderen heb je een handle nodig uit rtm_list_tasks of ' +
-        'rtm_add_task. RTM staat maar 1 request per seconde toe, dus vraag niet meer op dan nodig.'
+        'Remember The Milk. Tasks can be added using Smart Add syntax in the name. ' +
+        'To update, complete or delete a task you need a handle from rtm_list_tasks or ' +
+        'rtm_add_task. RTM allows only 1 request per second, so do not fetch more than needed.'
     }
   );
 
   registerTools(server, client);
 
-  // Valideer het token één keer bij het opstarten in plaats van bij elke call.
+  // Validate the token once at startup instead of on every call.
   try {
     const rsp = await client.call<{ auth: { perms: string; user: { username: string } } }>(
       'rtm.auth.checkToken'
     );
-    log(`ingelogd als ${rsp.auth.user.username} (perms: ${rsp.auth.perms})`);
+    log(`logged in as ${rsp.auth.user.username} (perms: ${rsp.auth.perms})`);
   } catch (e) {
-    log(`waarschuwing: token check faalde: ${e instanceof Error ? e.message : String(e)}`);
+    log(`warning: token check failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   await server.connect(new StdioServerTransport());
-  log('server draait op stdio');
+  log('server running on stdio');
 }
 
 main().catch((e) => {
-  log(`fataal: ${e instanceof Error ? e.message : String(e)}`);
+  log(`fatal: ${e instanceof Error ? e.message : String(e)}`);
   process.exit(1);
 });

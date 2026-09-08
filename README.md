@@ -1,104 +1,115 @@
 # rtm-mcp
 
-MCP server voor Remember The Milk. Stdio-transport, bedoeld om vanuit Claude Code
-in WSL taken weg te schrijven en op te halen.
+MCP server for Remember The Milk. Stdio transport, meant to add and fetch tasks
+from Claude Code in WSL (or any other local MCP client).
 
-## Wat het kan
+## What it does
 
-| Tool | Wat het doet |
+| Tool | Purpose |
 |---|---|
-| `rtm_add_task` | Taak toevoegen, met Smart Add syntax (`^friday !1 #Werk`) of letterlijk |
-| `rtm_list_tasks` | Taken ophalen met RTM's filter-taal (`status:incomplete AND dueBefore:today`) |
-| `rtm_complete_task` | Afvinken |
-| `rtm_update_task` | Naam, due date, prioriteit, tags, estimate |
-| `rtm_delete_task` | Verwijderen (soft delete bij RTM) |
-| `rtm_get_lists` | Lijsten, met smart lists gemarkeerd |
-| `rtm_undo` | Laatste omkeerbare wijziging(en) van deze sessie terugdraaien |
+| `rtm_add_task` | Add a task, with Smart Add syntax (`^friday !1 #Work`) or as literal text |
+| `rtm_list_tasks` | Fetch tasks using RTM's filter language (`status:incomplete AND dueBefore:today`) |
+| `rtm_complete_task` | Mark as complete |
+| `rtm_update_task` | Name, due date, priority, tags, estimate |
+| `rtm_delete_task` | Delete (soft delete on RTM's side) |
+| `rtm_get_lists` | Lists, with smart lists marked |
+| `rtm_undo` | Revert the last undoable change(s) made in this session |
 
-De Smart Add tokens en de filter-syntax staan in de tool-descriptions, dus het
-model hoeft ze niet te raden.
+The Smart Add tokens and the filter syntax are part of the tool descriptions,
+so the model does not have to guess them.
 
-## Installeren
+## Install
 
 ```bash
-git clone <of pak het archief uit> ~/tools/rtm-mcp
+git clone https://github.com/rjbijl/rtm-mcp.git ~/tools/rtm-mcp
 cd ~/tools/rtm-mcp
 npm install
 npm run build
 ```
 
-Zet je key en secret in de omgeving en autoriseer eenmalig:
+Put your key and secret in the environment and authorize once:
 
 ```bash
-export RTM_API_KEY=jouw_key
-export RTM_SHARED_SECRET=jouw_secret
+export RTM_API_KEY=your_key
+export RTM_SHARED_SECRET=your_secret
 npm run auth
 ```
 
-Dat print een URL. Keur hem goed in de browser, druk op Enter, en het token
-belandt in `~/.config/rtm-mcp/auth.json` (mode 600). Het token verloopt niet
-vanzelf — alleen als je de toegang bij RTM intrekt.
+That prints a URL. Approve it in the browser, press Enter, and the token ends
+up in `~/.config/rtm-mcp/auth.json` (mode 600). The token does not expire on
+its own; only when you revoke access in RTM.
 
-## Aanhaken in Claude Code
+## Hooking it into Claude Code
 
 ```bash
 claude mcp add --scope user rtm \
-  --env RTM_API_KEY=jouw_key \
-  --env RTM_SHARED_SECRET=jouw_secret \
-  -- node /home/JOUW_USER/tools/rtm-mcp/dist/index.js
+  --env RTM_API_KEY=your_key \
+  --env RTM_SHARED_SECRET=your_secret \
+  -- node /home/YOUR_USER/tools/rtm-mcp/dist/index.js
 ```
 
-`--scope user` zet hem in `~/.claude.json` zodat hij in al je projecten
-beschikbaar is. Het pad moet absoluut zijn: Claude Code start dit proces zelf
-en heeft geen idee van je working directory.
+`--scope user` puts it in `~/.claude.json` so it is available in all your
+projects. The path must be absolute: Claude Code starts this process itself and
+has no idea what your working directory is.
 
-Controleren: `/mcp` in een sessie, of `claude mcp list`.
+Verify with `/mcp` in a session, or `claude mcp list`.
 
-## Hoe het werkt
+## How it works
 
-Claude Code start `dist/index.js` als subproces en praat JSON-RPC over
-stdin/stdout. Er draait dus geen daemon en er is geen poort. Consequentie:
-**stdout is heilig** — alle logging in deze server gaat naar stderr. Eén
-`console.log` in de serverpad en de verbinding is stuk.
+Claude Code starts `dist/index.js` as a subprocess and talks JSON-RPC over
+stdin/stdout. So there is no daemon and no port. Consequence: **stdout is
+sacred**; all logging in this server goes to stderr. One `console.log` on the
+server path and the connection is broken.
 
-Wat de client voor je afvangt:
+What the client handles for you:
 
-- **api_sig signing.** md5 van je shared secret plus alle parameters
-  alfabetisch gesorteerd en aan elkaar geplakt.
-- **Rate limiting.** RTM staat 1 request per seconde toe met burst tot 3.
-  Daarboven vertraagt RTM je en gaat uiteindelijk 503'en. Er zit een token
-  bucket voor met exponentiële backoff op 503.
-- **Timeline-hergebruik.** Elke schrijfactie vereist een timeline. Er wordt er
-  één per proces aangemaakt en hergebruikt; dat scheelt een call van je
-  secondebudget bij elke actie.
-- **De single-vs-array quirk.** RTM's JSON maakt van één element een object en
-  van meerdere een array. Alles gaat door een normalisatie-helper.
-- **Het id-triple.** Taakbewerkingen vereisen `list_id` + `taskseries_id` +
-  `task_id`. Die worden gebundeld in één opaque handle, zodat het model ze niet
-  door elkaar kan halen.
-- **Herhalende taken.** Eén taskseries kan meerdere task-instanties bevatten;
-  die worden allemaal apart teruggegeven met een eigen handle.
+- **api_sig signing.** md5 of your shared secret plus all parameters sorted
+  alphabetically and concatenated.
+- **Rate limiting.** RTM allows 1 request per second with bursts up to 3.
+  Beyond that RTM throttles you and eventually returns 503. A token bucket sits
+  in front, with exponential backoff on 503.
+- **Timeouts.** Every request is aborted after 20 seconds and retried, so a
+  stalled connection never blocks a tool call.
+- **Timeline reuse.** Every write requires a timeline. One is created per
+  process and reused; that saves a call from your per-second budget on every
+  action.
+- **The single-vs-array quirk.** RTM's JSON turns one element into an object
+  and several into an array. Everything goes through a normalization helper.
+- **The id triple.** Task operations require `list_id` + `taskseries_id` +
+  `task_id`. Those are bundled into one opaque handle so the model cannot mix
+  them up.
+- **Repeating tasks.** One taskseries can contain several task instances; each
+  is returned separately with its own handle.
 
-## Testen
+## Testing
 
 ```bash
-npm test                       # signing, normalisatie, handles, flattening
-node --test test/protocol.test.mjs   # volledige tool-flows tegen een mock-endpoint
-node test/smoke.mjs            # echte stdio-server via een echte MCP client
+npm test                       # signing, normalization, handles, flattening
+node --test test/protocol.test.mjs   # full tool flows against a mock endpoint
+node test/smoke.mjs            # real stdio server through a real MCP client
 ```
 
-De protocol-tests draaien tegen een lokale nagebootste RTM (`RTM_REST_ENDPOINT`
-override), inclusief 503-retry en foutcode-mapping.
+The protocol tests run against a local mock RTM, including 503 retry, timeout
+and error-code mapping. To do that they override `RTM_REST_ENDPOINT`. Because
+every request carries your `api_key` and `auth_token`, the server refuses such
+an override unless `RTM_ALLOW_ENDPOINT_OVERRIDE=1` is set explicitly alongside
+it; it then reports the override on stderr. Leave that flag out in production.
 
-## Later: ook vanuit Cowork
+## Later: from Cowork as well
 
-Stdio werkt alleen op de machine waar Claude Code draait. Wil je dezelfde taken
-ook vanuit Cowork of claude.ai benaderen, dan moet er een remote HTTP-variant
-komen: `StreamableHTTPServerTransport` uit dezelfde SDK om `src/index.ts` heen,
-draaiend op een machine die publiek bereikbaar is, met OAuth ervoor. De tools in
-`src/tools.ts` en de client in `src/rtm.ts` zijn transport-agnostisch en kunnen
-één op één mee.
+Stdio only works on the machine where Claude Code runs. If you want to reach
+the same tasks from Cowork or claude.ai, a remote HTTP variant is needed:
+`StreamableHTTPServerTransport` from the same SDK wrapped around
+`src/index.ts`, running on a publicly reachable machine, with OAuth in front.
+The tools in `src/tools.ts` and the client in `src/rtm.ts` are
+transport-agnostic and can move over as-is.
 
-Alternatief voor dat scenario: RTM's eigen gehoste MCP server op
-`https://www.rememberthemilk.com/mcp`, die werkt in beide surfaces maar een
-Pro-abonnement vereist.
+Alternative for that scenario: RTM's own hosted MCP server at
+`https://www.rememberthemilk.com/mcp`, which works in both surfaces but
+requires a Pro subscription.
+
+## License and origin
+
+MIT, see [LICENSE](LICENSE). Built by Robert-Jan Bijl together with Claude
+(Anthropic's Claude Code); the tests, the security hardening and most of the
+code came out of that collaboration.

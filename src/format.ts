@@ -14,7 +14,7 @@ function formatDue(task: RtmTaskInstance): string {
   if (!task.due) return '';
   const d = new Date(task.due);
   if (Number.isNaN(d.getTime())) return task.due;
-  // has_due_time=0 betekent "hele dag"; RTM zet die op middernacht UTC.
+  // has_due_time=0 means "all day"; RTM puts those at midnight UTC.
   return task.has_due_time === '1'
     ? d.toISOString().replace('T', ' ').slice(0, 16) + 'Z'
     : d.toISOString().slice(0, 10);
@@ -33,9 +33,9 @@ export interface FlatTask {
 }
 
 /**
- * Platslaan van de geneste tasks > list > taskseries > task structuur.
- * Let op: één taskseries kan meerdere task-instanties bevatten (herhalende
- * taken), dus dit is een dubbele lus, geen map.
+ * Flattens the nested tasks > list > taskseries > task structure.
+ * Note: one taskseries can hold several task instances (repeating tasks),
+ * so this is a nested loop, not a map.
  */
 export function flattenTasks(
   rsp: { tasks?: { list?: unknown } },
@@ -67,7 +67,7 @@ export function flattenTasks(
 }
 
 export function renderTasks(tasks: FlatTask[]): string {
-  if (tasks.length === 0) return 'Geen taken gevonden voor dit filter.';
+  if (tasks.length === 0) return 'No tasks found for this filter.';
   const lines = tasks.map((t) => {
     const bits = [
       t.completed ? '[x]' : '[ ]',
@@ -80,18 +80,18 @@ export function renderTasks(tasks: FlatTask[]): string {
     ].filter(Boolean);
     return bits.join('  ');
   });
-  return `${tasks.length} ta${tasks.length === 1 ? 'ak' : 'ken'}:\n${lines.join('\n')}`;
+  return `${tasks.length} task${tasks.length === 1 ? '' : 's'}:\n${lines.join('\n')}`;
 }
 
 export function renderLists(lists: RtmList[]): string {
   const active = lists.filter((l) => l.deleted !== '1');
   const lines = active.map((l) => {
     const flags = [
-      l.smart === '1' ? 'smart (read-only voor nieuwe taken)' : '',
-      l.archived === '1' ? 'gearchiveerd' : '',
+      l.smart === '1' ? 'smart (read-only for new tasks)' : '',
+      l.archived === '1' ? 'archived' : '',
       l.locked === '1' ? 'locked' : ''
     ].filter(Boolean);
     return `${l.name}${flags.length ? `  (${flags.join(', ')})` : ''}`;
   });
-  return `${active.length} lijsten:\n${lines.join('\n')}`;
+  return `${active.length} lists:\n${lines.join('\n')}`;
 }

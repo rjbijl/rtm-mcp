@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * Eenmalige autorisatie via RTM's desktop-flow:
- *   getFrob -> gebruiker keurt goed in de browser -> getToken.
- * Het token verloopt niet vanzelf; alleen als je de toegang in RTM intrekt.
+ * One-time authorization via RTM's desktop flow:
+ *   getFrob -> user approves in the browser -> getToken.
+ * The token never expires on its own; only when you revoke access in RTM.
  */
 import { createInterface } from 'node:readline/promises';
 import { stdin, stdout } from 'node:process';
 import { loadCredentials, writeStoredAuth } from './config.js';
 import { AUTH_ENDPOINT, RtmClient, signParams } from './rtm.js';
 
-const PERMS = 'delete'; // impliceert read + write; verbreden vereist de hele flow opnieuw
+const PERMS = 'delete'; // implies read + write; widening later means redoing the whole flow
 
 async function main(): Promise<void> {
   const creds = loadCredentials(false);
@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   );
   const frob = frobRsp.frob;
 
-  // De auth-URL wordt apart ondertekend: alleen api_key, perms en frob tellen mee.
+  // The auth URL is signed separately: only api_key, perms and frob are included.
   const authParams: Record<string, string> = {
     api_key: creds.apiKey,
     perms: PERMS,
@@ -31,12 +31,12 @@ async function main(): Promise<void> {
   authParams.api_sig = signParams(authParams, creds.sharedSecret);
   const url = `${AUTH_ENDPOINT}?${new URLSearchParams(authParams).toString()}`;
 
-  console.log('\nOpen deze URL in je browser en keur de toegang goed:\n');
+  console.log('\nOpen this URL in your browser and approve access:\n');
   console.log(url);
   console.log('');
 
   const rl = createInterface({ input: stdin, output: stdout });
-  await rl.question('Druk op Enter zodra je "OK, I\'ll allow it" hebt geklikt... ');
+  await rl.question('Press Enter once you have clicked "OK, I\'ll allow it"... ');
   rl.close();
 
   const tokenRsp = await client.call<{
@@ -49,14 +49,14 @@ async function main(): Promise<void> {
     perms: tokenRsp.auth.perms
   });
 
-  console.log(`\nGelukt. Ingelogd als ${tokenRsp.auth.user.username} (perms: ${tokenRsp.auth.perms}).`);
-  console.log(`Token opgeslagen in ${path}`);
+  console.log(`\nDone. Logged in as ${tokenRsp.auth.user.username} (perms: ${tokenRsp.auth.perms}).`);
+  console.log(`Token stored in ${path}`);
 }
 
 main().catch((e) => {
-  console.error(`\nMislukt: ${e instanceof Error ? e.message : String(e)}`);
+  console.error(`\nFailed: ${e instanceof Error ? e.message : String(e)}`);
   if (String(e).includes('101')) {
-    console.error('Code 101 betekent dat de frob nog niet goedgekeurd is. Klik eerst de URL af.');
+    console.error('Code 101 means the frob has not been approved yet. Open the URL first.');
   }
   process.exit(1);
 });

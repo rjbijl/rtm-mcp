@@ -1,7 +1,7 @@
 /**
- * Smoke test: start de echte server over stdio met een echte MCP client,
- * inventariseert de tools en controleert dat een falende call netjes als
- * tool-error terugkomt in plaats van de verbinding te slopen.
+ * Smoke test: start the real server over stdio with a real MCP client,
+ * list the tools and check that a failing call comes back as a clean
+ * tool error instead of tearing down the connection.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -39,28 +39,28 @@ const expected = [
 ];
 const missing = expected.filter((n) => !tools.some((t) => t.name === n));
 if (missing.length) {
-  console.error(`ONTBREEKT: ${missing.join(', ')}`);
+  console.error(`MISSING: ${missing.join(', ')}`);
   process.exit(1);
 }
 
-// Ongeldige handle: moet een nette tool-error geven, geen crash.
+// Invalid handle: must give a clean tool error, not a crash.
 const bad = await client.callTool({
   name: 'rtm_complete_task',
-  arguments: { handle: 'rommel' }
+  arguments: { handle: 'junk' }
 });
-console.log(`\nongeldige handle -> isError=${bad.isError}: ${bad.content[0].text}`);
+console.log(`\ninvalid handle -> isError=${bad.isError}: ${bad.content[0].text}`);
 if (!bad.isError) {
-  console.error('VERWACHTTE een tool-error');
+  console.error('EXPECTED a tool error');
   process.exit(1);
 }
 
-// Echte call met nep-credentials: RTM moet een foutcode teruggeven die wij vertalen.
+// Real call with fake credentials: RTM must return an error code that we translate.
 const denied = await client.callTool({ name: 'rtm_get_lists', arguments: {} });
-console.log(`nep-credentials -> isError=${denied.isError}: ${denied.content[0].text}`);
+console.log(`fake credentials -> isError=${denied.isError}: ${denied.content[0].text}`);
 
-// Verbinding moet nog leven na twee fouten.
+// The connection must still be alive after two errors.
 const again = await client.listTools();
-console.log(`\nverbinding leeft nog: ${again.tools.length} tools`);
+console.log(`\nconnection still alive: ${again.tools.length} tools`);
 
 await client.close();
 console.log('SMOKE OK');

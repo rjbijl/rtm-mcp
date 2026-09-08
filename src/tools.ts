@@ -5,30 +5,33 @@ import { decodeHandle, encodeHandle } from './handles.js';
 import { flattenTasks, renderLists, renderTasks } from './format.js';
 
 const SMART_ADD_HELP = `
-Smart Add syntax (in het name-veld, alleen als smart_add=true):
-  ^  due date/tijd    ^tomorrow, ^friday 17:00, ^15/3/2026, ^next monday
-  !  prioriteit 1-3   !1
-  #  lijst OF tag     #Work  (matcht eerst een bestaande lijstnaam, anders wordt het een tag)
-  @  locatie          @kantoor
-  *  herhaling        *daily, *every week, *after 2 weeks
-  =  tijdsinschatting =30 min, =2 hours
-  een URL in de tekst wordt aan de taak gekoppeld
-Let op: # is dubbelzinnig. Wil je gegarandeerd een specifieke lijst, gebruik dan
-de list-parameter in plaats van #Naam.`.trim();
+Smart Add syntax (in the name field, only when smart_add=true):
+  ^  due date/time    ^tomorrow, ^friday 17:00, ^15/3/2026, ^next monday
+  !  priority 1-3     !1
+  #  list OR tag      #Work  (matches an existing list name first, otherwise becomes a tag)
+  @  location         @office
+  *  repeat           *daily, *every week, *after 2 weeks
+  =  time estimate    =30 min, =2 hours
+  a URL in the text is attached to the task
+Note: # is ambiguous. If you need a specific list for sure, use the list
+parameter instead of #Name.`.trim();
 
 const FILTER_HELP = `
-Filter syntax (dezelfde taal als RTM's advanced search / smart lists):
+Filter syntax (the same language as RTM's advanced search / smart lists):
   status:incomplete | status:completed
   list:Inbox | list:"Dead Projects"
   priority:1 | priority:none
   due:today | due:never | dueBefore:today | dueAfter:"today 23:59"
   dueWithin:"1 week of today"
-  tag:werk | isTagged:false | tagContains:@
+  tag:work | isTagged:false | tagContains:@
   addedWithin:"1 week of today" | completedWithin:"1 week of today"
   isRepeating:true | hasNotes:false | noteContains:foo
-  te combineren met AND, OR, NOT en haakjes
-Waarden met spaties altijd tussen dubbele quotes.
-Voorbeeld: status:incomplete AND (dueBefore:today OR due:today)`.trim();
+  combine with AND, OR, NOT and parentheses
+Always put values containing spaces in double quotes.
+Example: status:incomplete AND (dueBefore:today OR due:today)`.trim();
+
+/** Three numeric ids plus separators in base64url stays well under 128. */
+const handleSchema = z.string().max(128).describe('Task handle.');
 
 function text(content: string) {
   return { content: [{ type: 'text' as const, text: content }] };
@@ -38,18 +41,18 @@ function errorText(content: string) {
   return { content: [{ type: 'text' as const, text: content }], isError: true };
 }
 
-/** Vertaalt RTM-foutcodes naar iets waar het model wat mee kan. */
+/** Translates RTM error codes into something the model can act on. */
 function explain(e: unknown): string {
   if (e instanceof RtmError) {
     const hints: Record<string, string> = {
-      '98': 'Het auth token is ongeldig of ingetrokken. Draai `npm run auth` opnieuw.',
-      '99': 'Onvoldoende permissies voor deze actie.',
-      '320': 'Ongeldige lijst.',
-      '340': 'Ongeldige taak-handle; haal een verse handle op met rtm_list_tasks.',
-      '3040': 'Deze lijst is read-only.',
-      '4020': 'Je kunt geen taak toevoegen aan een smart list; kies een gewone lijst.',
-      '4040': 'Subtaken vereisen een RTM Pro-account.',
-      '4080': 'De due date ligt vóór de startdatum.'
+      '98': 'The auth token is invalid or has been revoked. Run `npm run auth` again.',
+      '99': 'Insufficient permissions for this action.',
+      '320': 'Invalid list.',
+      '340': 'Invalid task handle; fetch a fresh one with rtm_list_tasks.',
+      '3040': 'This list is read-only.',
+      '4020': 'You cannot add a task to a smart list; pick a regular list.',
+      '4040': 'Subtasks require an RTM Pro account.',
+      '4080': 'The due date is before the start date.'
     };
     const hint = hints[e.code];
     return hint ? `${e.message}\n${hint}` : e.message;
@@ -66,24 +69,24 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_add_task',
     {
-      title: 'Taak toevoegen aan Remember The Milk',
+      title: 'Add a task to Remember The Milk',
       description:
-        'Voegt een taak toe aan Remember The Milk. Zonder list-parameter komt de taak in de Inbox.\n\n' +
+        'Adds a task to Remember The Milk. Without the list parameter the task goes to the Inbox.\n\n' +
         SMART_ADD_HELP,
       inputSchema: {
         name: z
           .string()
           .min(1)
-          .describe('De taaknaam, eventueel met Smart Add tokens als smart_add true is.'),
+          .describe('The task name, optionally with Smart Add tokens when smart_add is true.'),
         list: z
           .string()
           .optional()
-          .describe('Naam van de lijst waar de taak in moet. Weglaten = Inbox.'),
+          .describe('Name of the list the task should go in. Omit for Inbox.'),
         smart_add: z
           .boolean()
           .default(true)
-          .describe('Smart Add parsing van ^ ! # @ * = in de naam. Zet op false voor letterlijke tekst.'),
-        note: z.string().optional().describe('Optionele notitie bij de taak.')
+          .describe('Smart Add parsing of ^ ! # @ * = in the name. Set to false for literal text.'),
+        note: z.string().optional().describe('Optional note attached to the task.')
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
     },
@@ -99,10 +102,10 @@ export function registerTools(server: McpServer, client: RtmClient): void {
               .filter((l) => l.deleted !== '1' && l.smart !== '1')
               .map((l) => l.name)
               .join(', ');
-            return errorText(`Lijst "${list}" bestaat niet. Beschikbaar: ${available}`);
+            return errorText(`List "${list}" does not exist. Available: ${available}`);
           }
           if (target.smart === '1') {
-            return errorText(`"${list}" is een smart list; daar kun je geen taken aan toevoegen.`);
+            return errorText(`"${list}" is a smart list; tasks cannot be added to it.`);
           }
           listId = target.id;
         }
@@ -117,7 +120,7 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           list_id: listId
         });
 
-        client.recordTransaction(rsp.transaction, `taak toegevoegd: ${name}`);
+        client.recordTransaction(rsp.transaction, `task added: ${name}`);
 
         const series = asArray(rsp.list.taskseries)[0];
         const task = asArray(series.task)[0];
@@ -141,7 +144,7 @@ export function registerTools(server: McpServer, client: RtmClient): void {
         const names = await listNameMap(client);
         const where = names.get(rsp.list.id) ?? rsp.list.id;
         const due = task.due ? ` (due ${task.due})` : '';
-        return text(`Toegevoegd aan ${where}: "${series.name}"${due}\nhandle: ${handle}`);
+        return text(`Added to ${where}: "${series.name}"${due}\nhandle: ${handle}`);
       } catch (e) {
         return errorText(explain(e));
       }
@@ -151,22 +154,22 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_list_tasks',
     {
-      title: 'Taken ophalen uit Remember The Milk',
+      title: 'List tasks from Remember The Milk',
       description:
-        'Haalt taken op. Standaard alleen openstaande taken. Elke taak krijgt een handle die je ' +
-        'nodig hebt voor afvinken, wijzigen of verwijderen.\n\n' +
+        'Fetches tasks. Only incomplete tasks by default. Every task comes with a handle that you ' +
+        'need to complete, update or delete it.\n\n' +
         FILTER_HELP,
       inputSchema: {
         filter: z
           .string()
           .optional()
-          .describe('RTM filter-expressie. Wordt gecombineerd met include_completed.'),
-        list: z.string().optional().describe('Beperk tot deze lijstnaam.'),
+          .describe('RTM filter expression. Combined with include_completed.'),
+        list: z.string().optional().describe('Restrict to this list name.'),
         include_completed: z
           .boolean()
           .default(false)
-          .describe('Ook afgeronde taken meenemen.'),
-        limit: z.number().int().min(1).max(200).default(50).describe('Maximum aantal taken.')
+          .describe('Include completed tasks as well.'),
+        limit: z.number().int().min(1).max(200).default(50).describe('Maximum number of tasks.')
       },
       annotations: { readOnlyHint: true }
     },
@@ -175,11 +178,11 @@ export function registerTools(server: McpServer, client: RtmClient): void {
         let listId: string | undefined;
         if (list) {
           const target = await client.findList(list);
-          if (!target) return errorText(`Lijst "${list}" bestaat niet.`);
+          if (!target) return errorText(`List "${list}" does not exist.`);
           listId = target.id;
         }
 
-        // Zonder status-filter geeft RTM ook alle afgeronde taken terug.
+        // Without a status filter RTM also returns every completed task.
         const clauses: string[] = [];
         if (filter) clauses.push(`(${filter})`);
         if (!include_completed && !/status:/i.test(filter ?? '')) {
@@ -203,7 +206,7 @@ export function registerTools(server: McpServer, client: RtmClient): void {
 
         const shown = tasks.slice(0, limit);
         const suffix =
-          tasks.length > shown.length ? `\n(${tasks.length - shown.length} meer, verhoog limit)` : '';
+          tasks.length > shown.length ? `\n(${tasks.length - shown.length} more, raise limit)` : '';
         return text(renderTasks(shown) + suffix);
       } catch (e) {
         return errorText(explain(e));
@@ -214,9 +217,9 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_complete_task',
     {
-      title: 'Taak afvinken',
-      description: 'Vinkt een taak af. Gebruik de handle uit rtm_list_tasks of rtm_add_task.',
-      inputSchema: { handle: z.string().describe('Task handle.') },
+      title: 'Complete a task',
+      description: 'Marks a task as complete. Use the handle from rtm_list_tasks or rtm_add_task.',
+      inputSchema: { handle: handleSchema },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
     },
     async ({ handle }) => {
@@ -232,8 +235,8 @@ export function registerTools(server: McpServer, client: RtmClient): void {
             task_id: ref.taskId
           }
         );
-        client.recordTransaction(rsp.transaction, 'taak afgevinkt');
-        return text('Afgevinkt.');
+        client.recordTransaction(rsp.transaction, 'task completed');
+        return text('Completed.');
       } catch (e) {
         return errorText(explain(e));
       }
@@ -243,30 +246,31 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_update_task',
     {
-      title: 'Taak wijzigen',
+      title: 'Update a task',
       description:
-        'Wijzigt naam, due date, prioriteit, tags of tijdsinschatting van een bestaande taak. ' +
-        'Elk opgegeven veld kost een aparte API-call, dus geef alleen mee wat echt verandert.\n' +
-        'Let op: tags VERVANGT alle bestaande tags; gebruik add_tags om toe te voegen.',
+        'Changes the name, due date, priority, tags or time estimate of an existing task. ' +
+        'Every field you pass costs a separate API call, so only pass what actually changes.\n' +
+        'Note: tags REPLACES all existing tags; use add_tags to add to them.',
       inputSchema: {
-        handle: z.string().describe('Task handle.'),
-        name: z.string().optional().describe('Nieuwe taaknaam.'),
+        handle: handleSchema,
+        name: z.string().optional().describe('New task name.'),
         due: z
           .string()
           .optional()
           .describe(
-            'Nieuwe due date. Natuurlijke taal mag ("next friday", "tomorrow 9am"). ' +
-              'Geef "none" om de due date te wissen.'
+            'New due date. Natural language is fine ("next friday", "tomorrow 9am"). ' +
+              'Pass "none" to clear the due date.'
           ),
         priority: z
           .enum(['1', '2', '3', 'none'])
           .optional()
-          .describe('Prioriteit 1 (hoogst) t/m 3, of "none".'),
-        tags: z.array(z.string()).optional().describe('Vervangt ALLE tags door deze lijst.'),
-        add_tags: z.array(z.string()).optional().describe('Voegt tags toe zonder bestaande te wissen.'),
-        estimate: z.string().optional().describe('Tijdsinschatting, bijv. "30 min" of "2 hours".')
+          .describe('Priority 1 (highest) through 3, or "none".'),
+        tags: z.array(z.string()).optional().describe('Replaces ALL tags with this list.'),
+        add_tags: z.array(z.string()).optional().describe('Adds tags without removing existing ones.'),
+        estimate: z.string().optional().describe('Time estimate, e.g. "30 min" or "2 hours".')
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true }
+      // name and tags overwrite existing data; that is destructive, even though undo can revert it.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     },
     async ({ handle, name, due, priority, tags, add_tags, estimate }) => {
       try {
@@ -282,13 +286,13 @@ export function registerTools(server: McpServer, client: RtmClient): void {
 
         if (name !== undefined) {
           await client.call('rtm.tasks.setName', { ...base, name });
-          done.push(`naam -> "${name}"`);
+          done.push(`name -> "${name}"`);
         }
         if (due !== undefined) {
           if (due.toLowerCase() === 'none' || due === '') {
-            // due weglaten wist de due date
+            // omitting due clears the due date
             await client.call('rtm.tasks.setDueDate', { ...base });
-            done.push('due date gewist');
+            done.push('due date cleared');
           } else {
             await client.call('rtm.tasks.setDueDate', { ...base, due, parse: '1' });
             done.push(`due -> ${due}`);
@@ -299,23 +303,23 @@ export function registerTools(server: McpServer, client: RtmClient): void {
             ...base,
             priority: priority === 'none' ? 'N' : priority
           });
-          done.push(`prioriteit -> ${priority}`);
+          done.push(`priority -> ${priority}`);
         }
         if (tags !== undefined) {
           await client.call('rtm.tasks.setTags', { ...base, tags: tags.join(',') });
-          done.push(`tags -> ${tags.join(', ') || '(leeg)'}`);
+          done.push(`tags -> ${tags.join(', ') || '(none)'}`);
         }
         if (add_tags !== undefined && add_tags.length > 0) {
           await client.call('rtm.tasks.addTags', { ...base, tags: add_tags.join(',') });
-          done.push(`tags toegevoegd: ${add_tags.join(', ')}`);
+          done.push(`tags added: ${add_tags.join(', ')}`);
         }
         if (estimate !== undefined) {
           await client.call('rtm.tasks.setEstimate', { ...base, estimate });
           done.push(`estimate -> ${estimate}`);
         }
 
-        if (done.length === 0) return errorText('Niets om te wijzigen: geef minstens één veld mee.');
-        return text(`Bijgewerkt: ${done.join('; ')}`);
+        if (done.length === 0) return errorText('Nothing to update: pass at least one field.');
+        return text(`Updated: ${done.join('; ')}`);
       } catch (e) {
         return errorText(explain(e));
       }
@@ -325,11 +329,11 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_delete_task',
     {
-      title: 'Taak verwijderen',
+      title: 'Delete a task',
       description:
-        'Verwijdert een taak. RTM doet een soft delete, dus rtm_undo kan dit terugdraaien. ' +
-        'Vereist delete-permissies op het auth token.',
-      inputSchema: { handle: z.string().describe('Task handle.') },
+        'Deletes a task. RTM does a soft delete, so rtm_undo can revert this. ' +
+        'Requires delete permissions on the auth token.',
+      inputSchema: { handle: handleSchema },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     },
     async ({ handle }) => {
@@ -342,8 +346,8 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           taskseries_id: ref.seriesId,
           task_id: ref.taskId
         });
-        client.recordTransaction(rsp.transaction, 'taak verwijderd');
-        return text('Verwijderd. Terugdraaien kan met rtm_undo.');
+        client.recordTransaction(rsp.transaction, 'task deleted');
+        return text('Deleted. Use rtm_undo to revert.');
       } catch (e) {
         return errorText(explain(e));
       }
@@ -353,11 +357,11 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_get_lists',
     {
-      title: 'Lijsten ophalen',
+      title: 'Get lists',
       description:
-        'Geeft alle RTM-lijsten. Smart lists worden gemarkeerd; daar kun je geen taken aan toevoegen.',
+        'Returns all RTM lists. Smart lists are marked; tasks cannot be added to those.',
       inputSchema: {
-        refresh: z.boolean().default(false).describe('Cache omzeilen en opnieuw ophalen.')
+        refresh: z.boolean().default(false).describe('Bypass the cache and fetch again.')
       },
       annotations: { readOnlyHint: true }
     },
@@ -373,19 +377,19 @@ export function registerTools(server: McpServer, client: RtmClient): void {
   server.registerTool(
     'rtm_undo',
     {
-      title: 'Laatste wijziging terugdraaien',
+      title: 'Undo the last change',
       description:
-        'Draait de laatste omkeerbare wijziging in deze sessie terug (toevoegen, afvinken, ' +
-        'wijzigen, verwijderen). Zonder argumenten wordt de meest recente teruggedraaid.',
+        'Reverts the most recent undoable change made in this session (add, complete, ' +
+        'update, delete). Without arguments the most recent one is reverted.',
       inputSchema: {
-        steps: z.number().int().min(1).max(5).default(1).describe('Aantal wijzigingen terugdraaien.')
+        steps: z.number().int().min(1).max(5).default(1).describe('Number of changes to revert.')
       },
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     },
     async ({ steps }) => {
       try {
         if (client.recentTransactions.length === 0) {
-          return errorText('Geen omkeerbare wijzigingen bekend in deze sessie.');
+          return errorText('No undoable changes known in this session.');
         }
         const timeline = await client.getTimeline();
         const undone: string[] = [];
@@ -395,7 +399,7 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           await client.call('rtm.transactions.undo', { timeline, transaction_id: tx.id });
           undone.push(tx.description);
         }
-        return text(`Teruggedraaid: ${undone.join('; ')}`);
+        return text(`Reverted: ${undone.join('; ')}`);
       } catch (e) {
         return errorText(explain(e));
       }

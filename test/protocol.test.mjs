@@ -1,7 +1,7 @@
 /**
- * Test het gedrag tegen een nagebootste RTM-endpoint: signature in de body,
- * rsp.stat=fail mapping, 503-retry, timeline-hergebruik en de volledige
- * add-task-flow inclusief handle.
+ * Tests behaviour against a mock RTM endpoint: signature in the body,
+ * rsp.stat=fail mapping, 503 retry, timeline reuse and the full
+ * add-task flow including the handle.
  */
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,6 +22,7 @@ const httpServer = createServer((req, res) => {
       res.end(JSON.stringify(obj));
     };
 
+    if (scenario === 'hang') return; // never answer; the client has to abort on its own
     if (scenario === 'fail98') {
       return send({ rsp: { stat: 'fail', err: { code: '98', msg: 'Login failed / Invalid auth token' } } });
     }
@@ -38,9 +39,9 @@ const httpServer = createServer((req, res) => {
           rsp: {
             stat: 'ok',
             lists: { list: [
-              { id: 'L1', name: 'Inbox', deleted: '0', locked: '1', archived: '0', position: '-1', smart: '0' },
-              { id: 'L2', name: 'Werk', deleted: '0', locked: '0', archived: '0', position: '0', smart: '0' },
-              { id: 'L3', name: 'Vandaag', deleted: '0', locked: '0', archived: '0', position: '0', smart: '1', filter: 'due:today' }
+              { id: '1001', name: 'Inbox', deleted: '0', locked: '1', archived: '0', position: '-1', smart: '0' },
+              { id: '1002', name: 'Work', deleted: '0', locked: '0', archived: '0', position: '0', smart: '0' },
+              { id: '1003', name: 'Today', deleted: '0', locked: '0', archived: '0', position: '0', smart: '1', filter: 'due:today' }
             ] }
           }
         });
@@ -49,9 +50,9 @@ const httpServer = createServer((req, res) => {
           rsp: {
             stat: 'ok',
             transaction: { id: 'TX-1', undoable: '1' },
-            list: { id: params.list_id ?? 'L1', taskseries: {
-              id: 'S9', created: '', modified: '', name: params.name, source: 'api', url: '', location_id: '',
-              task: { id: 'T9', due: '2026-09-11T00:00:00Z', has_due_time: '0', added: '', completed: '', deleted: '', priority: '1', postponed: '0', estimate: '' }
+            list: { id: params.list_id ?? '1001', taskseries: {
+              id: '9009', created: '', modified: '', name: params.name, source: 'api', url: '', location_id: '',
+              task: { id: '9010', due: '2026-09-11T00:00:00Z', has_due_time: '0', added: '', completed: '', deleted: '', priority: '1', postponed: '0', estimate: '' }
             } }
           }
         });
@@ -70,6 +71,7 @@ before(async () => {
   await new Promise((r) => httpServer.listen(0, '127.0.0.1', r));
   baseUrl = `http://127.0.0.1:${httpServer.address().port}/`;
   process.env.RTM_REST_ENDPOINT = baseUrl;
+  process.env.RTM_ALLOW_ENDPOINT_OVERRIDE = '1';
   ({ RtmClient } = await import('../dist/rtm.js'));
   ({ registerTools } = await import('../dist/tools.js'));
   ({ McpServer } = await import('@modelcontextprotocol/sdk/server/mcp.js'));
@@ -77,7 +79,10 @@ before(async () => {
   ({ InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js'));
 });
 
-after(() => httpServer.close());
+after(() => {
+  httpServer.closeAllConnections();
+  httpServer.close();
+});
 
 function newClient() {
   return new RtmClient({ apiKey: 'KEY', sharedSecret: 'BANANAS', authToken: 'TOKEN' });
@@ -92,7 +97,7 @@ async function connectedClient() {
   return client;
 }
 
-test('elke call stuurt api_key, format=json, v=2, auth_token en een geldige api_sig', async () => {
+test('every call sends api_key, format=json, v=2, auth_token and a valid api_sig', async () => {
   requests.length = 0;
   scenario = 'ok';
   await newClient().call('rtm.lists.getList');
@@ -103,10 +108,10 @@ test('elke call stuurt api_key, format=json, v=2, auth_token en een geldige api_
   assert.equal(req.auth_token, 'TOKEN');
   const { signParams } = await import('../dist/rtm.js');
   const { api_sig, ...rest } = req;
-  assert.equal(api_sig, signParams(rest, 'BANANAS'), 'api_sig moet over alle overige params kloppen');
+  assert.equal(api_sig, signParams(rest, 'BANANAS'), 'api_sig must cover all other params');
 });
 
-test('rsp.stat=fail wordt een RtmError met code', async () => {
+test('rsp.stat=fail becomes an RtmError with a code', async () => {
   scenario = 'fail98';
   await assert.rejects(() => newClient().call('rtm.lists.getList'), (e) => {
     assert.equal(e.name, 'RtmError');
@@ -116,7 +121,7 @@ test('rsp.stat=fail wordt een RtmError met code', async () => {
   scenario = 'ok';
 });
 
-test('foutcode 98 krijgt een bruikbare hint richting het model', async () => {
+test('error code 98 gets an actionable hint for the model', async () => {
   scenario = 'fail98';
   const client = await connectedClient();
   const res = await client.callTool({ name: 'rtm_get_lists', arguments: {} });
@@ -125,16 +130,16 @@ test('foutcode 98 krijgt een bruikbare hint richting het model', async () => {
   scenario = 'ok';
 });
 
-test('HTTP 503 wordt geretryd in plaats van gegooid', async () => {
+test('HTTP 503 is retried instead of thrown', async () => {
   requests.length = 0;
   scenario = 'flaky503';
   const rsp = await newClient().call('rtm.lists.getList');
-  assert.ok(rsp.lists, 'moet uiteindelijk slagen');
-  assert.equal(requests.length, 3, 'twee keer 503, derde poging slaagt');
+  assert.ok(rsp.lists, 'must eventually succeed');
+  assert.equal(requests.length, 3, 'two 503s, third attempt succeeds');
   scenario = 'ok';
 });
 
-test('timeline wordt één keer aangemaakt en daarna hergebruikt', async () => {
+test('the timeline is created once and reused afterwards', async () => {
   requests.length = 0;
   const client = newClient();
   await client.getTimeline();
@@ -143,95 +148,130 @@ test('timeline wordt één keer aangemaakt en daarna hergebruikt', async () => {
   assert.equal(requests.filter((r) => r.method === 'rtm.timelines.create').length, 1);
 });
 
-test('add_task naar een bestaande lijst geeft een bruikbare handle terug', async () => {
+test('add_task to an existing list returns a usable handle', async () => {
   const client = await connectedClient();
   const res = await client.callTool({
     name: 'rtm_add_task',
-    arguments: { name: 'Factuur sturen ^friday !1', list: 'Werk' }
+    arguments: { name: 'Send invoice ^friday !1', list: 'Work' }
   });
   assert.notEqual(res.isError, true, res.content[0].text);
   const handle = res.content[0].text.match(/handle: (\S+)/)?.[1];
-  assert.ok(handle, 'antwoord moet een handle bevatten');
+  assert.ok(handle, 'response must contain a handle');
   const { decodeHandle } = await import('../dist/handles.js');
-  assert.deepEqual(decodeHandle(handle), { listId: 'L2', seriesId: 'S9', taskId: 'T9' });
+  assert.deepEqual(decodeHandle(handle), { listId: '1002', seriesId: '9009', taskId: '9010' });
   const add = requests.findLast((r) => r.method === 'rtm.tasks.add');
-  assert.equal(add.parse, '1', 'smart add staat standaard aan');
-  assert.equal(add.list_id, 'L2', 'lijstnaam moet naar id vertaald zijn');
+  assert.equal(add.parse, '1', 'smart add is on by default');
+  assert.equal(add.list_id, '1002', 'list name must be translated to an id');
   assert.equal(add.timeline, 'TL-1');
 });
 
-test('add_task weigert een smart list met uitleg', async () => {
+test('add_task refuses a smart list with an explanation', async () => {
   const client = await connectedClient();
   const res = await client.callTool({
     name: 'rtm_add_task',
-    arguments: { name: 'Test', list: 'Vandaag' }
+    arguments: { name: 'Test', list: 'Today' }
   });
   assert.equal(res.isError, true);
   assert.match(res.content[0].text, /smart list/);
 });
 
-test('add_task noemt de beschikbare lijsten bij een onbekende lijstnaam', async () => {
+test('add_task names the available lists for an unknown list name', async () => {
   const client = await connectedClient();
   const res = await client.callTool({
     name: 'rtm_add_task',
-    arguments: { name: 'Test', list: 'Bestaatniet' }
+    arguments: { name: 'Test', list: 'DoesNotExist' }
   });
   assert.equal(res.isError, true);
-  assert.match(res.content[0].text, /Inbox, Werk/);
+  assert.match(res.content[0].text, /Inbox, Work/);
 });
 
-test('list_tasks voegt status:incomplete toe tenzij je dat zelf regelt', async () => {
+test('list_tasks adds status:incomplete unless you handle it yourself', async () => {
   const client = await connectedClient();
   await client.callTool({ name: 'rtm_list_tasks', arguments: {} });
   assert.match(requests.findLast((r) => r.method === 'rtm.tasks.getList').filter, /status:incomplete/);
 
   await client.callTool({ name: 'rtm_list_tasks', arguments: { filter: 'status:completed' } });
   const second = requests.findLast((r) => r.method === 'rtm.tasks.getList').filter;
-  assert.equal(second, '(status:completed)', 'eigen status-filter wordt niet overschreven');
+  assert.equal(second, '(status:completed)', 'an explicit status filter is not overridden');
 
   await client.callTool({ name: 'rtm_list_tasks', arguments: { include_completed: true } });
   assert.equal(requests.findLast((r) => r.method === 'rtm.tasks.getList').filter, undefined);
 });
 
-test('undo draait de laatste toevoeging terug', async () => {
+test('undo reverts the most recent addition', async () => {
   const client = await connectedClient();
-  await client.callTool({ name: 'rtm_add_task', arguments: { name: 'Weg hiermee' } });
+  await client.callTool({ name: 'rtm_add_task', arguments: { name: 'Get rid of this' } });
   const res = await client.callTool({ name: 'rtm_undo', arguments: {} });
   assert.notEqual(res.isError, true, res.content[0].text);
-  assert.match(res.content[0].text, /Weg hiermee/);
+  assert.match(res.content[0].text, /Get rid of this/);
   const undo = requests.findLast((r) => r.method === 'rtm.transactions.undo');
   assert.equal(undo.transaction_id, 'TX-1');
 });
 
-test('undo zonder geschiedenis geeft een nette melding', async () => {
+test('undo without history gives a clean message', async () => {
   const client = await connectedClient();
   const res = await client.callTool({ name: 'rtm_undo', arguments: {} });
   assert.equal(res.isError, true);
-  assert.match(res.content[0].text, /Geen omkeerbare wijzigingen/);
+  assert.match(res.content[0].text, /No undoable changes/);
 });
 
-test('update_task zonder velden doet geen enkele API-call', async () => {
+test('update_task without fields makes no API call at all', async () => {
   const client = await connectedClient();
   const { encodeHandle } = await import('../dist/handles.js');
   const before = requests.length;
   const res = await client.callTool({
     name: 'rtm_update_task',
-    arguments: { handle: encodeHandle({ listId: 'L1', seriesId: 'S1', taskId: 'T1' }) }
+    arguments: { handle: encodeHandle({ listId: '1001', seriesId: '5001', taskId: '5002' }) }
   });
   assert.equal(res.isError, true);
-  assert.match(res.content[0].text, /minstens één veld/);
+  assert.match(res.content[0].text, /at least one field/);
   assert.equal(requests.filter((r) => r.method.startsWith('rtm.tasks.set')).length, 0);
   assert.ok(requests.length >= before);
 });
 
-test('update_task met due "none" wist de due date', async () => {
+test('update_task with due "none" clears the due date', async () => {
   const client = await connectedClient();
   const { encodeHandle } = await import('../dist/handles.js');
   await client.callTool({
     name: 'rtm_update_task',
-    arguments: { handle: encodeHandle({ listId: 'L1', seriesId: 'S1', taskId: 'T1' }), due: 'none' }
+    arguments: { handle: encodeHandle({ listId: '1001', seriesId: '5001', taskId: '5002' }), due: 'none' }
   });
   const call = requests.findLast((r) => r.method === 'rtm.tasks.setDueDate');
-  assert.equal(call.due, undefined, 'due weglaten is hoe RTM de datum wist');
+  assert.equal(call.due, undefined, 'omitting due is how RTM clears the date');
   assert.equal(call.parse, undefined);
+});
+
+test('a hanging RTM is aborted on the request timeout', { timeout: 10_000 }, async () => {
+  scenario = 'hang';
+  const client = new RtmClient(
+    { apiKey: 'KEY', sharedSecret: 'BANANAS', authToken: 'TOKEN' },
+    { requestTimeoutMs: 200 }
+  );
+  const started = Date.now();
+  await assert.rejects(() => client.call('rtm.lists.getList'), /did not respond within 200ms/);
+  assert.ok(Date.now() - started < 8000, 'must not hang indefinitely');
+  scenario = 'ok';
+});
+
+test('an absurdly long handle is rejected by the schema, not by RTM', async () => {
+  const client = await connectedClient();
+  const before = requests.length;
+  const res = await client.callTool({
+    name: 'rtm_complete_task',
+    arguments: { handle: 'A'.repeat(300) }
+  });
+  assert.equal(res.isError, true);
+  assert.doesNotMatch(res.content[0].text, /Invalid task handle/, 'must be caught by the schema, not by decodeHandle');
+  assert.match(res.content[0].text, /128/, 'the error names the maximum length');
+  assert.equal(requests.length, before, 'no API call for a handle that fails the schema');
+});
+
+test('update and undo are annotated as destructive', async () => {
+  const client = await connectedClient();
+  const { tools } = await client.listTools();
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  assert.equal(byName.rtm_update_task.annotations.destructiveHint, true, 'name/tags overwrite data');
+  assert.equal(byName.rtm_undo.annotations.destructiveHint, true, 'undo reverts earlier changes');
+  assert.equal(byName.rtm_delete_task.annotations.destructiveHint, true);
+  assert.equal(byName.rtm_list_tasks.annotations.readOnlyHint, true);
 });
