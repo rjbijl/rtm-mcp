@@ -65,13 +65,24 @@ async function listNameMap(client: RtmClient): Promise<Map<string, string>> {
   return new Map(lists.map((l) => [l.id, l.name]));
 }
 
-export function registerTools(server: McpServer, client: RtmClient): void {
+export interface ToolOptions {
+  /** Project tag for this session, see detectProject(). Undefined disables project tagging. */
+  project?: string;
+}
+
+export function registerTools(server: McpServer, client: RtmClient, opts: ToolOptions = {}): void {
+  const { project } = opts;
+
   server.registerTool(
     'rtm_add_task',
     {
       title: 'Add a task to Remember The Milk',
       description:
         'Adds a task to Remember The Milk. Without the list parameter the task goes to the Inbox.\n\n' +
+        (project
+          ? `Current project: "${project}". New tasks are tagged "${project}" automatically; ` +
+            'pass tag_project=false for tasks unrelated to this project.\n\n'
+          : '') +
         SMART_ADD_HELP,
       inputSchema: {
         name: z
@@ -86,11 +97,15 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           .boolean()
           .default(true)
           .describe('Smart Add parsing of ^ ! # @ * = in the name. Set to false for literal text.'),
-        note: z.string().optional().describe('Optional note attached to the task.')
+        note: z.string().optional().describe('Optional note attached to the task.'),
+        tag_project: z
+          .boolean()
+          .default(true)
+          .describe('Tag the task with the current project. Set to false for unrelated tasks.')
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false }
     },
-    async ({ name, list, smart_add, note }) => {
+    async ({ name, list, smart_add, note, tag_project }) => {
       try {
         const timeline = await client.getTimeline();
         let listId: string | undefined;
@@ -130,21 +145,24 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           taskId: task.id
         });
 
+        const ids = { timeline, list_id: rsp.list.id, taskseries_id: series.id, task_id: task.id };
+
+        // A separate addTags call rather than "#project" in the name: # matches a list
+        // name first, and Smart Add is off entirely when smart_add=false.
+        const projectTag = project && tag_project ? project : undefined;
+        if (projectTag) {
+          await client.call('rtm.tasks.addTags', { ...ids, tags: projectTag });
+        }
+
         if (note) {
-          await client.call('rtm.tasks.notes.add', {
-            timeline,
-            list_id: rsp.list.id,
-            taskseries_id: series.id,
-            task_id: task.id,
-            note_title: '',
-            note_text: note
-          });
+          await client.call('rtm.tasks.notes.add', { ...ids, note_title: '', note_text: note });
         }
 
         const names = await listNameMap(client);
         const where = names.get(rsp.list.id) ?? rsp.list.id;
         const due = task.due ? ` (due ${task.due})` : '';
-        return text(`Added to ${where}: "${series.name}"${due}\nhandle: ${handle}`);
+        const tagged = projectTag ? ` #${projectTag}` : '';
+        return text(`Added to ${where}: "${series.name}"${due}${tagged}\nhandle: ${handle}`);
       } catch (e) {
         return errorText(explain(e));
       }
@@ -158,6 +176,10 @@ export function registerTools(server: McpServer, client: RtmClient): void {
       description:
         'Fetches tasks. Only incomplete tasks by default. Every task comes with a handle that you ' +
         'need to complete, update or delete it.\n\n' +
+        (project
+          ? `Current project: "${project}". Results are limited to tasks tagged "${project}"; ` +
+            'pass all_projects=true to search across everything.\n\n'
+          : '') +
         FILTER_HELP,
       inputSchema: {
         filter: z
@@ -169,11 +191,15 @@ export function registerTools(server: McpServer, client: RtmClient): void {
           .boolean()
           .default(false)
           .describe('Include completed tasks as well.'),
-        limit: z.number().int().min(1).max(200).default(50).describe('Maximum number of tasks.')
+        limit: z.number().int().min(1).max(200).default(50).describe('Maximum number of tasks.'),
+        all_projects: z
+          .boolean()
+          .default(false)
+          .describe('Do not restrict to the current project tag.')
       },
       annotations: { readOnlyHint: true }
     },
-    async ({ filter, list, include_completed, limit }) => {
+    async ({ filter, list, include_completed, limit, all_projects }) => {
       try {
         let listId: string | undefined;
         if (list) {
@@ -188,6 +214,7 @@ export function registerTools(server: McpServer, client: RtmClient): void {
         if (!include_completed && !/status:/i.test(filter ?? '')) {
           clauses.push('status:incomplete');
         }
+        if (project && !all_projects) clauses.push(`tag:${project}`);
         const effectiveFilter = clauses.join(' AND ') || undefined;
 
         const rsp = await client.call<{ tasks?: { list?: unknown } }>('rtm.tasks.getList', {

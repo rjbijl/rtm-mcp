@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { loadCredentials } from './config.js';
 import { RtmClient } from './rtm.js';
+import { detectProject } from './project.js';
 import { registerTools } from './tools.js';
 
 /**
@@ -16,6 +17,8 @@ function log(msg: string): void {
 async function main(): Promise<void> {
   const creds = loadCredentials(true);
   const client = new RtmClient(creds);
+  // Claude Code starts us with the project directory as cwd; that name becomes the project tag.
+  const project = detectProject();
 
   const server = new McpServer(
     { name: 'rtm-mcp', version: '0.1.0' },
@@ -23,11 +26,15 @@ async function main(): Promise<void> {
       instructions:
         'Remember The Milk. Tasks can be added using Smart Add syntax in the name. ' +
         'To update, complete or delete a task you need a handle from rtm_list_tasks or ' +
-        'rtm_add_task. RTM allows only 1 request per second, so do not fetch more than needed.'
+        'rtm_add_task. RTM allows only 1 request per second, so do not fetch more than needed.' +
+        (project
+          ? ` This session runs in project "${project}": new tasks are tagged with it and ` +
+            'rtm_list_tasks only shows tasks with that tag unless all_projects is set.'
+          : '')
     }
   );
 
-  registerTools(server, client);
+  registerTools(server, client, { project });
 
   // Validate the token once at startup instead of on every call.
   try {
@@ -40,7 +47,7 @@ async function main(): Promise<void> {
   }
 
   await server.connect(new StdioServerTransport());
-  log('server running on stdio');
+  log(project ? `server running on stdio, project "${project}"` : 'server running on stdio, no project');
 }
 
 main().catch((e) => {

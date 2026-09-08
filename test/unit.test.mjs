@@ -4,6 +4,7 @@ import { signParams, asArray, resolveRestEndpoint } from '../dist/rtm.js';
 import { encodeHandle, decodeHandle } from '../dist/handles.js';
 import { flattenTasks } from '../dist/format.js';
 import { writeStoredAuth } from '../dist/config.js';
+import { detectProject } from '../dist/project.js';
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -142,4 +143,55 @@ test('writeStoredAuth resets an existing auth.json back to 0600', () => {
     if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = prev;
   }
+});
+
+function tmp() {
+  return mkdtempSync(join(tmpdir(), 'rtm-mcp-project-'));
+}
+
+test('detectProject uses the git root name when started in a subdirectory', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'myproj', '.git'), { recursive: true });
+  mkdirSync(join(root, 'myproj', 'backend', 'src'), { recursive: true });
+  assert.equal(detectProject(join(root, 'myproj', 'backend', 'src'), {}, join(root, 'home')), 'myproj');
+});
+
+test('detectProject treats a .git file (worktree) as a repo root too', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'wt', 'lib'), { recursive: true });
+  writeFileSync(join(root, 'wt', '.git'), 'gitdir: /elsewhere');
+  assert.equal(detectProject(join(root, 'wt', 'lib'), {}, join(root, 'home')), 'wt');
+});
+
+test('detectProject falls back to the cwd name outside a repo', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'loose'));
+  assert.equal(detectProject(join(root, 'loose'), {}, join(root, 'home')), 'loose');
+});
+
+test('detectProject yields no project in the home directory or at /', () => {
+  const home = tmp();
+  assert.equal(detectProject(home, {}, home), undefined);
+  assert.equal(detectProject('/', {}, home), undefined);
+});
+
+test('detectProject ignores a repo root that is the home directory itself', () => {
+  const home = tmp();
+  mkdirSync(join(home, '.git'));
+  mkdirSync(join(home, 'proj'));
+  assert.equal(detectProject(join(home, 'proj'), {}, home), 'proj');
+  assert.equal(detectProject(home, {}, home), undefined);
+});
+
+test('RTM_PROJECT overrides detection; empty disables it', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'ignored', '.git'), { recursive: true });
+  assert.equal(detectProject(join(root, 'ignored'), { RTM_PROJECT: 'My Project' }, join(root, 'home')), 'my-project');
+  assert.equal(detectProject(join(root, 'ignored'), { RTM_PROJECT: '' }, join(root, 'home')), undefined);
+});
+
+test('detectProject normalizes to a safe RTM tag', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'Foo  Bar,Baz'));
+  assert.equal(detectProject(join(root, 'Foo  Bar,Baz'), {}, join(root, 'home')), 'foo-barbaz');
 });

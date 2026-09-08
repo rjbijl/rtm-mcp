@@ -88,9 +88,9 @@ function newClient() {
   return new RtmClient({ apiKey: 'KEY', sharedSecret: 'BANANAS', authToken: 'TOKEN' });
 }
 
-async function connectedClient() {
+async function connectedClient(opts = {}) {
   const server = new McpServer({ name: 't', version: '1' });
-  registerTools(server, newClient());
+  registerTools(server, newClient(), opts);
   const [a, b] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 't', version: '1' });
   await Promise.all([server.connect(b), client.connect(a)]);
@@ -274,4 +274,63 @@ test('update and undo are annotated as destructive', async () => {
   assert.equal(byName.rtm_undo.annotations.destructiveHint, true, 'undo reverts earlier changes');
   assert.equal(byName.rtm_delete_task.annotations.destructiveHint, true);
   assert.equal(byName.rtm_list_tasks.annotations.readOnlyHint, true);
+});
+
+test('with a project, add_task tags the new task with the project name', async () => {
+  const client = await connectedClient({ project: 'icrop' });
+  const res = await client.callTool({ name: 'rtm_add_task', arguments: { name: 'Fix login' } });
+  assert.notEqual(res.isError, true, res.content[0].text);
+  const tagCall = requests.findLast((r) => r.method === 'rtm.tasks.addTags');
+  assert.ok(tagCall, 'addTags must be called');
+  assert.equal(tagCall.tags, 'icrop');
+  assert.deepEqual(
+    [tagCall.list_id, tagCall.taskseries_id, tagCall.task_id],
+    ['1001', '9009', '9010'],
+    'tag goes on the task that was just created'
+  );
+  assert.match(res.content[0].text, /#icrop/);
+});
+
+test('add_task with tag_project=false leaves the project tag off', async () => {
+  const client = await connectedClient({ project: 'icrop' });
+  const before = requests.filter((r) => r.method === 'rtm.tasks.addTags').length;
+  await client.callTool({ name: 'rtm_add_task', arguments: { name: 'Personal errand', tag_project: false } });
+  assert.equal(requests.filter((r) => r.method === 'rtm.tasks.addTags').length, before);
+});
+
+test('without a project, add_task never calls addTags', async () => {
+  const client = await connectedClient();
+  const before = requests.filter((r) => r.method === 'rtm.tasks.addTags').length;
+  await client.callTool({ name: 'rtm_add_task', arguments: { name: 'Untagged' } });
+  assert.equal(requests.filter((r) => r.method === 'rtm.tasks.addTags').length, before);
+});
+
+test('with a project, list_tasks filters on the project tag unless all_projects is set', async () => {
+  const client = await connectedClient({ project: 'icrop' });
+  await client.callTool({ name: 'rtm_list_tasks', arguments: {} });
+  assert.equal(
+    requests.findLast((r) => r.method === 'rtm.tasks.getList').filter,
+    'status:incomplete AND tag:icrop'
+  );
+
+  await client.callTool({ name: 'rtm_list_tasks', arguments: { filter: 'priority:1' } });
+  assert.equal(
+    requests.findLast((r) => r.method === 'rtm.tasks.getList').filter,
+    '(priority:1) AND status:incomplete AND tag:icrop'
+  );
+
+  await client.callTool({ name: 'rtm_list_tasks', arguments: { all_projects: true, include_completed: true } });
+  assert.equal(requests.findLast((r) => r.method === 'rtm.tasks.getList').filter, undefined);
+});
+
+test('the project name is spelled out in the tool descriptions', async () => {
+  const client = await connectedClient({ project: 'icrop' });
+  const { tools } = await client.listTools();
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+  assert.match(byName.rtm_add_task.description, /icrop/);
+  assert.match(byName.rtm_list_tasks.description, /icrop/);
+
+  const plain = await connectedClient();
+  const plainTools = Object.fromEntries((await plain.listTools()).tools.map((t) => [t.name, t]));
+  assert.doesNotMatch(plainTools.rtm_add_task.description, /project/i, 'no project talk when there is none');
 });
